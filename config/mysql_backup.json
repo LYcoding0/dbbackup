@@ -1,0 +1,35 @@
+{
+  "backup_type": "full",
+  "backup_dir": "/data/backup/tmp",
+  "backup_prefix": "mysql",
+  "retention_days": 7,
+  "tar_archive": true,
+  "log_dir": "/data/backup/tmp",
+  "mysql": {
+    "defaults_file": "/etc/my.cnf",
+    "socket": "/data/mysql/mysql.sock",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "xxxxx"
+  },
+  "xtrabackup": {
+    "bin": "/usr/bin/xtrabackup",
+    "parallel": 2,
+    "compress": true,
+    "compress_threads": 2,
+    "extra_args": []
+  },
+  "remote": {
+    "enabled": false,
+    "user": "root",
+    "host": "10.80.1.75",
+    "port": 22,
+    "dest_dir": "/data/backup"
+  },
+  "feishu": {
+    "enabled": true,
+    "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx",
+    "keyword": "数据库备份:"
+  }
+}
