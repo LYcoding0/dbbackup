@@ -76,6 +76,22 @@ GOOS=darwin GOARCH=amd64 go build -o dbbackup-macos dbbackup.go
 ./dbbackup -type mysql -host localhost -port 3306 -user root -pass yourpassword -mysql-tool xtrabackup -mysql-datadir /var/lib/mysql -out ./backups
 ```
 
+### 飞书 webhook 本地测试（推荐先用这个排查“卡片为什么发不出来”）
+
+仓库提供了一个小工具：`./cmd/feishu_test`，会打印飞书返回的 HTTP 状态码与响应体，便于定位权限/格式/关键字校验问题。
+
+```bash
+# 建议用环境变量，避免把 webhook 写到命令历史里
+export FEISHU_WEBHOOK='https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx'
+export FEISHU_KEYWORD='数据库备份:'
+
+# 发交互卡片（默认）
+go run ./cmd/feishu_test -mode card -status 成功 -backup-type full -backup-name mysql_full_20260103_210449
+
+# 发纯文本（用于对比）
+go run ./cmd/feishu_test -mode text -status 失败 -error "test error"
+```
+
 ### PostgreSQL 备份
 
 ```bash

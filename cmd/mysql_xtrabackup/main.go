@@ -127,6 +127,7 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// 运行前检测配置，环境变量，可执行文件...
 func validateConfig(cfg *Config) error {
 	if cfg.BackupType != "full" && cfg.BackupType != "incr" {
 		return fmt.Errorf("backup_type must be full or incr, got %s", cfg.BackupType)
@@ -189,6 +190,7 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
+// 运行备份
 func runBackup(cfg *Config) (*backupResult, error) {
 	if err := os.MkdirAll(cfg.BackupDir, 0755); err != nil {
 		return nil, fmt.Errorf("create backup_dir: %w", err)
@@ -267,6 +269,7 @@ func runBackup(cfg *Config) (*backupResult, error) {
 	}, nil
 }
 
+// 查找最近的一次全量备份
 func findLatestFull(root, prefix string) (string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -310,6 +313,7 @@ func tarDir(dir string, logger io.Writer) (string, error) {
 	return archive, nil
 }
 
+// 发送tar.gz包到存储服务器
 func sendArchive(cfg *Config, res *backupResult) error {
 	fmt.Printf("[%s] sending archive to %s@%s:%s ...\n", timeStamp(), cfg.Remote.User, cfg.Remote.Host, cfg.Remote.DestDir)
 	args := []string{
@@ -326,6 +330,7 @@ func sendArchive(cfg *Config, res *backupResult) error {
 	return nil
 }
 
+// 清理大于retention_days的数据
 func cleanupOld(cfg *Config) error {
 	entries, err := os.ReadDir(cfg.BackupDir)
 	if err != nil {
@@ -383,6 +388,7 @@ func fatalf(format string, a ...interface{}) {
 	os.Exit(1)
 }
 
+// 发送飞书消息
 func sendFeishu(cfg *Config, res *backupResult, status string, errMsg string) {
 	if !cfg.Feishu.Enabled {
 		return
@@ -397,9 +403,78 @@ func sendFeishu(cfg *Config, res *backupResult, status string, errMsg string) {
 		log = res.LogPath
 	}
 
+	// 关键字校验：确保 keyword 出现在 title / content 中
+	titlePrefix := ""
+	if cfg.Feishu.Keyword != "" {
+		titlePrefix = "[" + cfg.Feishu.Keyword + "] "
+	}
+	title := titlePrefix + "MySQL 备份" + status
+	if backupName != "" {
+		title += ": " + backupName
+	}
+
+	host, _ := os.Hostname()
+	color := "orange"
+	switch status {
+	case "成功":
+		color = "green"
+	case "失败":
+		color = "red"
+	}
+
+	mdLines := []string{}
+	if cfg.Feishu.Keyword != "" {
+		mdLines = append(mdLines, cfg.Feishu.Keyword)
+	}
+	mdLines = append(mdLines,
+		fmt.Sprintf("**状态**：%s", status),
+		fmt.Sprintf("**主机**：%s", host),
+		fmt.Sprintf("**类型**：%s", cfg.BackupType),
+		fmt.Sprintf("**备份名**：%s", backupName),
+		fmt.Sprintf("**文件**：%s", archive),
+		fmt.Sprintf("**日志**：%s", log),
+		fmt.Sprintf("**时间**：%s", time.Now().Format("2006-01-02 15:04:05")),
+	)
+	if errMsg != "" {
+		// lark_md 支持反引号，避免错误信息换行/特殊字符破坏布局
+		mdLines = append(mdLines, fmt.Sprintf("**错误**：`%s`", strings.ReplaceAll(errMsg, "`", "'")))
+	}
+	md := strings.Join(mdLines, "\n")
+
+	// 优先发送卡片消息（可读性更好）；若失败则回退到 text，避免通知丢失
+	cardPayload := map[string]interface{}{
+		"msg_type": "interactive",
+		"card": map[string]interface{}{
+			"config": map[string]bool{
+				"wide_screen_mode": true,
+			},
+			"header": map[string]interface{}{
+				"title": map[string]string{
+					"tag":     "plain_text",
+					"content": title,
+				},
+				"template": color,
+			},
+			"elements": []map[string]interface{}{
+				{
+					"tag": "div",
+					"text": map[string]string{
+						"tag":     "lark_md",
+						"content": md,
+					},
+				},
+			},
+		},
+	}
+	if err := postFeishuWebhook(cfg.Feishu.Webhook, cardPayload); err == nil {
+		return
+	}
+
 	textLines := []string{
 		cfg.Feishu.Keyword,
 		fmt.Sprintf("状态: %s", status),
+		fmt.Sprintf("主机: %s", host),
+		fmt.Sprintf("类型: %s", cfg.BackupType),
 		fmt.Sprintf("备份名: %s", backupName),
 		fmt.Sprintf("文件: %s", archive),
 		fmt.Sprintf("日志: %s", log),
@@ -407,20 +482,36 @@ func sendFeishu(cfg *Config, res *backupResult, status string, errMsg string) {
 	if errMsg != "" {
 		textLines = append(textLines, "错误: "+errMsg)
 	}
-	payload := map[string]interface{}{
+	textPayload := map[string]interface{}{
 		"msg_type": "text",
 		"content": map[string]string{
 			"text": strings.Join(textLines, "\n"),
 		},
 	}
-	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", cfg.Feishu.Webhook, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err := postFeishuWebhook(cfg.Feishu.Webhook, textPayload); err != nil {
 		fmt.Fprintf(os.Stderr, "send feishu failed: %v\n", err)
-		return
 	}
-	_ = resp.Body.Close()
+}
+
+func postFeishuWebhook(webhook string, payload map[string]interface{}) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", webhook, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
 }

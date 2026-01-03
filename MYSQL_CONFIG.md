@@ -7,7 +7,7 @@
 - `backup_dir`: 本地备份根目录。备份目录/归档会生成在此目录下。
 - `backup_prefix`: 备份命名前缀，实际备份目录名形如 `<prefix>_<type>_<timestamp>`.
 - `retention_days`: 历史保留天数，超期会清理；`0` 表示不清理。
-- `tar_archive`: `true` 则完成后将备份目录打成 `.tar.gz`（上传也用归档）；`false` 则保留目录。
+- `tar_archive`: `true` 则完成后将备份目录打成 `.tar.gz`（上传也用归档）；`false` 则不打包（上传也是整个目录）。
 - `log_dir`: 可选，日志目录；为空则默认 `<backup_dir>/log`。
 
 ## mysql
