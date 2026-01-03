@@ -32,4 +32,4 @@ go.work.sum
 # .vscode/
 
 script/
-xtrabackup_build.bat
+dist/
