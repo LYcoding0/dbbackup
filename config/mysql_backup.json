@@ -30,6 +30,6 @@
   "feishu": {
     "enabled": true,
     "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx",
-    "keyword": "数据库备份:"
+    "keyword": "MySQL备份:"
   }
 }

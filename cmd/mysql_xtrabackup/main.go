@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -69,15 +71,28 @@ func main() {
 	var cfgPath string
 	var backupTypeOverride string
 	var skipRemote bool
+	var info bool
 
-	flag.StringVar(&cfgPath, "config", "config/mysql_backup.json", "Path to config file (JSON)")
+	flag.StringVar(&cfgPath, "config", "config/config.json", "Path to config file (JSON)")
+	flag.StringVar(&cfgPath, "c", "config/config.json", "Shorthand for -config")
 	flag.StringVar(&backupTypeOverride, "type", "", "Override backup type: full or incr")
 	flag.BoolVar(&skipRemote, "skip-remote", false, "Skip sending to remote storage even if enabled")
+	flag.BoolVar(&info, "info", false, "Show backup info and exit")
 	flag.Parse()
 
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		fatalf("load config: %v", err)
+	}
+
+	if info {
+		if err := normalizeConfigForInfo(cfg); err != nil {
+			fatalf("config invalid: %v", err)
+		}
+		if err := showInfo(cfg); err != nil {
+			fatalf("info failed: %v", err)
+		}
+		return
 	}
 
 	if backupTypeOverride != "" {
@@ -125,6 +140,20 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// info 模式只需要本地目录信息，不强制要求 xtrabackup/mysql/scp 等依赖
+func normalizeConfigForInfo(cfg *Config) error {
+	if cfg.BackupDir == "" {
+		return errors.New("backup_dir is required")
+	}
+	if cfg.BackupPrefix == "" {
+		cfg.BackupPrefix = "mysql"
+	}
+	if cfg.LogDir == "" {
+		cfg.LogDir = filepath.Join(cfg.BackupDir, "log")
+	}
+	return nil
 }
 
 // 运行前检测配置，环境变量，可执行文件...
@@ -188,6 +217,221 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+type backupInfoItem struct {
+	Name        string
+	Type        string
+	Time        time.Time
+	DirPath     string
+	ArchivePath string
+	LogPath     string
+	DirSize     int64
+	ArchiveSize int64
+	LogSize     int64
+	ModTime     time.Time
+	Expired     bool
+}
+
+func showInfo(cfg *Config) error {
+	entries, err := os.ReadDir(cfg.BackupDir)
+	if err != nil {
+		return fmt.Errorf("read backup_dir: %w", err)
+	}
+
+	items := map[string]*backupInfoItem{}
+	for _, e := range entries {
+		name := e.Name()
+
+		isArchive := strings.HasSuffix(name, ".tar.gz")
+		baseName := name
+		if isArchive {
+			baseName = strings.TrimSuffix(name, ".tar.gz")
+		}
+
+		typ, ts, ok := parseBackupName(cfg.BackupPrefix, baseName)
+		if !ok {
+			continue
+		}
+
+		it, exists := items[baseName]
+		if !exists {
+			it = &backupInfoItem{
+				Name:    baseName,
+				Type:    typ,
+				Time:    ts,
+				DirSize: -1,
+			}
+			items[baseName] = it
+		}
+
+		fp := filepath.Join(cfg.BackupDir, name)
+		info, err := e.Info()
+		if err == nil {
+			if info.ModTime().After(it.ModTime) {
+				it.ModTime = info.ModTime()
+			}
+		}
+
+		if e.IsDir() {
+			it.DirPath = fp
+			if sz, err := dirSize(fp); err == nil {
+				it.DirSize = sz
+			}
+			continue
+		}
+
+		if isArchive && info != nil {
+			it.ArchivePath = fp
+			it.ArchiveSize = info.Size()
+		}
+	}
+
+	// 补充日志信息
+	for _, it := range items {
+		logPath := filepath.Join(cfg.LogDir, it.Name+".log")
+		if st, err := os.Stat(logPath); err == nil && !st.IsDir() {
+			it.LogPath = logPath
+			it.LogSize = st.Size()
+			if st.ModTime().After(it.ModTime) {
+				it.ModTime = st.ModTime()
+			}
+		}
+	}
+
+	// 计算过期（仅展示，不删除）
+	var cutoff time.Time
+	if cfg.RetentionDays > 0 {
+		cutoff = time.Now().AddDate(0, 0, -cfg.RetentionDays)
+		for _, it := range items {
+			if !it.ModTime.IsZero() && it.ModTime.Before(cutoff) {
+				it.Expired = true
+			}
+		}
+	}
+
+	// 排序输出（按时间倒序）
+	list := make([]*backupInfoItem, 0, len(items))
+	for _, it := range items {
+		list = append(list, it)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].Time.After(list[j].Time)
+	})
+
+	fullCount := 0
+	incrCount := 0
+	for _, it := range list {
+		if it.Type == "full" {
+			fullCount++
+		} else if it.Type == "incr" {
+			incrCount++
+		}
+	}
+
+	fmt.Printf("backup info\n")
+	fmt.Printf("  backup_dir: %s\n", cfg.BackupDir)
+	fmt.Printf("  log_dir:    %s\n", cfg.LogDir)
+	fmt.Printf("  prefix:     %s\n", cfg.BackupPrefix)
+	fmt.Printf("  retention:  %d days\n", cfg.RetentionDays)
+	if !cutoff.IsZero() {
+		fmt.Printf("  cutoff:     %s (before this will be eligible for cleanup)\n", cutoff.Format("2006-01-02 15:04:05"))
+	}
+	fmt.Printf("  backups:    %d (full=%d incr=%d)\n", len(list), fullCount, incrCount)
+	fmt.Println()
+
+	if len(list) == 0 {
+		fmt.Printf("no backups found under %s (prefix=%s)\n", cfg.BackupDir, cfg.BackupPrefix)
+		return nil
+	}
+
+	for _, it := range list {
+		exp := ""
+		if it.Expired {
+			exp = "  [EXPIRED]"
+		}
+		fmt.Printf("%s%s\n", it.Name, exp)
+		fmt.Printf("  type:     %s\n", it.Type)
+		fmt.Printf("  time:     %s\n", it.Time.Format("2006-01-02 15:04:05"))
+		if it.DirPath != "" {
+			if it.DirSize >= 0 {
+				fmt.Printf("  dir:      %s (%s)\n", it.DirPath, humanBytes(it.DirSize))
+			} else {
+				fmt.Printf("  dir:      %s\n", it.DirPath)
+			}
+		}
+		if it.ArchivePath != "" {
+			fmt.Printf("  archive:  %s (%s)\n", it.ArchivePath, humanBytes(it.ArchiveSize))
+		}
+		if it.LogPath != "" {
+			fmt.Printf("  log:      %s (%s)\n", it.LogPath, humanBytes(it.LogSize))
+		} else {
+			fmt.Printf("  log:      (missing)\n")
+		}
+		if !it.ModTime.IsZero() {
+			fmt.Printf("  mod_time: %s\n", it.ModTime.Format("2006-01-02 15:04:05"))
+		}
+		fmt.Println()
+	}
+	return nil
+}
+
+func parseBackupName(prefix, name string) (typ string, ts time.Time, ok bool) {
+	if !strings.HasPrefix(name, prefix+"_") {
+		return "", time.Time{}, false
+	}
+	rest := strings.TrimPrefix(name, prefix+"_")
+	if strings.HasPrefix(rest, "full_") {
+		typ = "full"
+		rest = strings.TrimPrefix(rest, "full_")
+	} else if strings.HasPrefix(rest, "incr_") {
+		typ = "incr"
+		rest = strings.TrimPrefix(rest, "incr_")
+	} else {
+		return "", time.Time{}, false
+	}
+	t, err := time.Parse("20060102_150405", rest)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	return typ, t, true
+}
+
+func dirSize(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for n >= div*unit && exp < 6 {
+		div *= unit
+		exp++
+	}
+	value := float64(n) / float64(div)
+	suffix := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}[exp]
+	return fmt.Sprintf("%.2f %s", value, suffix)
 }
 
 // 运行备份
@@ -388,6 +632,22 @@ func fatalf(format string, a ...interface{}) {
 	os.Exit(1)
 }
 
+// 获取本机 IP（非 127.0.0.1）
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "unknown"
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return "unknown"
+}
+
 // 发送飞书消息
 func sendFeishu(cfg *Config, res *backupResult, status string, errMsg string) {
 	if !cfg.Feishu.Enabled {
@@ -414,6 +674,7 @@ func sendFeishu(cfg *Config, res *backupResult, status string, errMsg string) {
 	}
 
 	host, _ := os.Hostname()
+	ip := getLocalIP()
 	color := "orange"
 	switch status {
 	case "成功":
@@ -429,6 +690,7 @@ func sendFeishu(cfg *Config, res *backupResult, status string, errMsg string) {
 	mdLines = append(mdLines,
 		fmt.Sprintf("**状态**：%s", status),
 		fmt.Sprintf("**主机**：%s", host),
+		fmt.Sprintf("**IP**：%s", ip),
 		fmt.Sprintf("**类型**：%s", cfg.BackupType),
 		fmt.Sprintf("**备份名**：%s", backupName),
 		fmt.Sprintf("**文件**：%s", archive),

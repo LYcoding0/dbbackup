@@ -76,7 +76,7 @@ GOOS=darwin GOARCH=amd64 go build -o dbbackup-macos dbbackup.go
 ./dbbackup -type mysql -host localhost -port 3306 -user root -pass yourpassword -mysql-tool xtrabackup -mysql-datadir /var/lib/mysql -out ./backups
 ```
 
-### 飞书 webhook 本地测试（推荐先用这个排查“卡片为什么发不出来”）
+### 飞书 webhook 本地测试
 
 仓库提供了一个小工具：`./cmd/feishu_test`，会打印飞书返回的 HTTP 状态码与响应体，便于定位权限/格式/关键字校验问题。
 
@@ -106,6 +106,18 @@ go run ./cmd/feishu_test -mode text -status 失败 -error "test error"
 
 # 使用完整参数备份所有数据库
 ./dbbackup -type postgresql -host localhost -port 5432 -user postgres -pass yourpassword -postgres-all -out ./backups
+```
+
+### PostgreSQL 物理备份（pgBackRest）
+
+仓库提供独立命令：`./cmd/postgresql_pgbackrest`（JSON 配置方式，适合生产定时任务）。
+
+```bash
+# 查看信息（等同于 pgbackrest info）
+go run ./cmd/postgresql_pgbackrest -c config/postgresql_pgbackrest.json -info
+
+# 执行备份（type 可覆盖配置）
+go run ./cmd/postgresql_pgbackrest -c config/postgresql_pgbackrest.json -type incr
 ```
 
 ### MongoDB 备份

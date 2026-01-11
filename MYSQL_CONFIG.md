@@ -36,11 +36,14 @@
 ## 运行示例
 ```bash
 # 全量
-go run ./cmd/mysql_xtrabackup -config config/mysql_backup.json -type full
+go run ./cmd/mysql_xtrabackup -c config/mysql_backup.json -type full
 
 # 增量（需已有一次 full 基线）
-go run ./cmd/mysql_xtrabackup -config config/mysql_backup.json -type incr
+go run ./cmd/mysql_xtrabackup -c config/mysql_backup.json -type incr
 
 # 跳过远端发送（即使 enabled=true 也不上传）
-go run ./cmd/mysql_xtrabackup -config config/mysql_backup.json -skip-remote
+go run ./cmd/mysql_xtrabackup -c config/mysql_backup.json -skip-remote
+
+# 显示备份信息
+go run ./cmd/mysql_xtrabackup -c config/mysql_backup.json -info
 ```

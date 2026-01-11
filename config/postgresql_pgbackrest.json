@@ -1,0 +1,18 @@
+{
+  "backup_type": "incr",
+  "retention_days": 7,
+  "log_dir": "/var/log/dbbackup/pgbackrest",
+  "pgbackrest": {
+    "bin": "/usr/bin/pgbackrest",
+    "config_file": "/etc/pgbackrest/pgbackrest.conf",
+    "stanza": "demo",
+    "repo_path": "/backup/pgbackup",
+    "extra_args": []
+  },
+  "feishu": {
+    "enabled": true,
+    "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx",
+    "keyword": "PG备份:"
+  }
+}
+

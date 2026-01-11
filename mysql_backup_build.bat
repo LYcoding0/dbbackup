@@ -9,7 +9,7 @@ set GOARCH=amd64
 
 if not exist dist mkdir dist
 
-go build -buildvcs=false -trimpath -o dist\mysql_xtrabackup_linux_amd64 ./cmd/mysql_xtrabackup
+go build -buildvcs=false -trimpath -o dist\mysql_backup ./cmd/mysql_xtrabackup
 if errorlevel 1 (
   echo Build failed!
   exit /b 1
