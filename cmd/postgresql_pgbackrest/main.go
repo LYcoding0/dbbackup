@@ -19,14 +19,14 @@ import (
 // Config pgBackRest 备份工具的 JSON 配置。
 type Config struct {
 	BackupType    string `json:"backup_type"`    // full / diff / incr
-	RetentionDays int    `json:"retention_days"` // 清理本工具日志保留天数（pgbackrest 备份保留请用 pgbackrest.conf 管理）
+	RetentionDays int    `json:"retention_days"` // 清理本工具日志保留天数（pgbackrest 备份由 pgbackrest.conf 管理）
 	LogDir        string `json:"log_dir"`        // 本工具日志目录
 
 	PgBackRest struct {
 		Bin        string   `json:"bin"`         // pgbackrest 路径；不填则 PATH 查找
 		ConfigFile string   `json:"config_file"` // pgbackrest.conf 路径（可选）
 		Stanza     string   `json:"stanza"`      // stanza 名称（必填）
-		RepoPath   string   `json:"repo_path"`   // repo 路径（可选，仅用于显示）
+		RepoPath   string   `json:"repo_path"`   // repo 路径（仅用于显示飞书信息）
 		ExtraArgs  []string `json:"extra_args"`  // 额外参数
 	} `json:"pgbackrest"`
 
@@ -116,7 +116,7 @@ func validateConfig(cfg *Config) error {
 		return errors.New("pgbackrest.stanza is required")
 	}
 	if cfg.LogDir == "" {
-		// 默认放到当前目录下，避免必须写绝对路径
+		// 默认放到当前目录下
 		cfg.LogDir = filepath.Join(".", "log")
 	}
 	if cfg.PgBackRest.Bin == "" {
@@ -231,7 +231,7 @@ func fatalf(format string, a ...interface{}) {
 	os.Exit(1)
 }
 
-// 获取本机 IP（非 127.0.0.1）
+// 获取本机第一个 IP（非 127.0.0.1）
 func getLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {

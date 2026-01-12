@@ -142,7 +142,7 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// info 模式只需要本地目录信息，不强制要求 xtrabackup/mysql/scp 等依赖
+// info 模式只需要本地目录信息
 func normalizeConfigForInfo(cfg *Config) error {
 	if cfg.BackupDir == "" {
 		return errors.New("backup_dir is required")
@@ -156,7 +156,7 @@ func normalizeConfigForInfo(cfg *Config) error {
 	return nil
 }
 
-// 运行前检测配置，环境变量，可执行文件...
+// 运行前检测配置，环境变量，可执行文件等...
 func validateConfig(cfg *Config) error {
 	if cfg.BackupType != "full" && cfg.BackupType != "incr" {
 		return fmt.Errorf("backup_type must be full or incr, got %s", cfg.BackupType)
@@ -703,7 +703,7 @@ func sendFeishu(cfg *Config, res *backupResult, status string, errMsg string) {
 	}
 	md := strings.Join(mdLines, "\n")
 
-	// 优先发送卡片消息（可读性更好）；若失败则回退到 text，避免通知丢失
+	// 优先发送卡片消息；若失败则回退到 text，避免通知丢失
 	cardPayload := map[string]interface{}{
 		"msg_type": "interactive",
 		"card": map[string]interface{}{
