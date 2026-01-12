@@ -31,5 +31,6 @@ go.work.sum
 # .idea/
 # .vscode/
 
-script/
+script/xtrabackup_backup01.sh
+script/xtrabackup_backup02.sh
 dist/
