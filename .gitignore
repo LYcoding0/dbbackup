@@ -28,8 +28,8 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
 
 script/xtrabackup_backup01.sh
 script/xtrabackup_backup02.sh
