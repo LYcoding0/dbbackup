@@ -159,7 +159,7 @@ pg_backup_build.bat
 
 ### 3. 原生工具备份 (支持 MySQL/PostgreSQL/MongoDB)
 
-使用命令行参数方式进行备份，适合简单场景。
+使用命令行参数方式进行备份，适合简单场景。不推荐使用了，代码较冗余
 
 #### MySQL 备份
 ```bash
