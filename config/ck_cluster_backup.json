@@ -1,0 +1,35 @@
+{
+  "clickhouse_backup": {
+    "mode": "api",
+    "scheme": "http",
+    "port": 7171,
+    "username": "api_user",
+    "password": "api_password",
+    "nodes": ["10.0.0.11", "10.0.0.12", "10.0.0.13", "10.0.0.14"],
+    "request_timeout_seconds": 30,
+    "poll_interval_seconds": 3,
+    "poll_timeout_seconds": 1800,
+    "ssh": {
+      "user": "root",
+      "port": 22,
+      "identity_file": "",
+      "bin": "clickhouse-backup",
+      "extra_args": [],
+      "batch_mode": true
+    }
+  },
+  "backup": {
+    "name_prefix": "daily_backup",
+    "create": {
+      "configs": true
+    }
+  },
+  "log": {
+    "dir": "./log"
+  },
+  "feishu": {
+    "enabled": false,
+    "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx",
+    "keyword": "ClickHouse备份"
+  }
+}
