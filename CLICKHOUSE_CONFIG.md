@@ -31,6 +31,7 @@
 ### backup
 - `name_prefix`: 备份名前缀，最终名称为 `<name_prefix>_<YYYYMMDD_HHMMSS>`
 - `create.configs`: 是否携带 `configs=true` 调用 create（等价 `.../backup/create?name=xxx&configs=true`）
+- `upload.enabled`: 是否执行 Upload 阶段（是否上传到远端仓库/MinIO）。为 `false` 时只做 create，不做 upload。
 
 ### log
 - `dir`: 日志目录；为空则只输出到 stdout（便于 crontab）

@@ -22,6 +22,9 @@
     "name_prefix": "daily_backup",
     "create": {
       "configs": true
+    },
+    "upload": {
+      "enabled": true
     }
   },
   "log": {

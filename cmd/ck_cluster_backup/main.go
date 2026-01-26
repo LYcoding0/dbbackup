@@ -46,12 +46,15 @@ type Config struct {
 
 	Backup struct {
 		NamePrefix string `json:"name_prefix"`
-
 		// Create 阶段的参数，对应 clickhouse-backup 的接口 query 参数：
 		// 例如 curl ".../backup/create?name=xxx&configs=true"
 		Create struct {
 			Configs bool `json:"configs"`
 		} `json:"create"`
+
+		Upload struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"upload"`
 	} `json:"backup"`
 
 	Log struct {
@@ -215,6 +218,15 @@ func runBackupCommand(args []string) error {
 		}
 		printSummary(logWriter, createSummary)
 		return errors.New("create phase failed")
+	}
+
+	if cfg.Backup.Upload.Enabled != nil && !*cfg.Backup.Upload.Enabled {
+		logInfoW(logWriter, "upload.enabled=false，已跳过 Upload 阶段（不会上传到远端仓库/MinIO）。")
+		if cfg.Feishu.Enabled && !skipFeishu {
+			sendFeishu(cfg, createSummary, "成功", "已跳过 Upload（upload.enabled=false）")
+		}
+		printSummary(logWriter, createSummary)
+		return nil
 	}
 
 	uploadSummary := runPhase(ctx, logWriter, cfg, clients, backupName, "upload")
@@ -383,7 +395,7 @@ func validateConfig(cfg *Config) error {
 		if cfg.ClickHouseBackup.SSH.Bin == "" {
 			cfg.ClickHouseBackup.SSH.Bin = "clickhouse-backup"
 		}
-		// 默认启用 BatchMode，避免交互式密码提示（你已配置免密时更合适）
+		// 默认启用 BatchMode，避免交互式密码提示
 		if cfg.ClickHouseBackup.SSH.BatchMode == nil {
 			v := true
 			cfg.ClickHouseBackup.SSH.BatchMode = &v
@@ -404,12 +416,16 @@ func validateConfig(cfg *Config) error {
 	if cfg.Backup.NamePrefix == "" {
 		cfg.Backup.NamePrefix = "daily_backup"
 	}
+	if cfg.Backup.Upload.Enabled == nil {
+		v := true
+		cfg.Backup.Upload.Enabled = &v
+	}
 	if cfg.Feishu.Enabled {
 		if cfg.Feishu.Webhook == "" {
-			return errors.New("feishu.webhook 不能为空（开启飞书通知时）")
+			return errors.New("feishu.webhook 不能为空")
 		}
 		if cfg.Feishu.Keyword == "" {
-			return errors.New("feishu.keyword 不能为空（需满足飞书关键字校验）")
+			return errors.New("feishu.keyword 不能为空")
 		}
 	}
 	return nil
@@ -546,10 +562,11 @@ func (c *Client) postActionJSON(ctx context.Context, path, name string) error {
 }
 
 type statusSnapshot struct {
-	Status   string
-	Command  string
-	Progress string
-	Raw      string
+	Status      string
+	Command     string
+	Progress    string
+	OperationID string
+	Raw         string
 }
 
 func (c *Client) GetStatus(ctx context.Context) (statusSnapshot, error) {
@@ -569,24 +586,32 @@ func (c *Client) GetStatus(ctx context.Context) (statusSnapshot, error) {
 		return statusSnapshot{}, fmt.Errorf("http %d: %s", resp.StatusCode, raw)
 	}
 
-	// status 可能是 JSON，也可能是简单字符串。这里做兼容解析。
+	// status 做兼容json和字符串解析。
 	var m map[string]interface{}
 	if err := json.Unmarshal(body, &m); err == nil {
 		status := firstString(m, "status", "state")
 		cmd := firstString(m, "command", "action", "operation")
+		opID := firstString(m, "operation_id", "operationId", "op_id", "opId")
 		progress := ""
 		if v, ok := m["progress"]; ok {
 			progress = fmt.Sprint(v)
 		}
-		return statusSnapshot{Status: strings.ToLower(status), Command: cmd, Progress: progress, Raw: raw}, nil
+		return statusSnapshot{
+			Status:      strings.ToLower(status),
+			Command:     cmd,
+			Progress:    progress,
+			OperationID: opID,
+			Raw:         raw,
+		}, nil
 	}
 
 	// 非 JSON：尝试从文本里提取关键字
 	return statusSnapshot{Status: strings.ToLower(raw), Raw: raw}, nil
 }
 
-func (c *Client) WaitSuccess(ctx context.Context, phase string, w io.Writer) error {
+func (c *Client) WaitSuccess(ctx context.Context, phase string, backupName string, prev statusSnapshot, w io.Writer) error {
 	deadline := time.Now().Add(c.PollTimeout)
+	seenNewOperation := false
 	for {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("轮询超时（phase=%s, timeout=%s）", phase, c.PollTimeout)
@@ -599,10 +624,25 @@ func (c *Client) WaitSuccess(ctx context.Context, phase string, w io.Writer) err
 			continue
 		}
 
+		// 避免被“上一次任务 success”误判：必须观测到本次备份相关的 command/operation_id 后，才开始接受 success 作为完成。
+		if !seenNewOperation {
+			if isSameOperation(prev, s) {
+				logInfoW(w, "[%s] phase=%s 等待本次任务开始（仍是上一次 operation）", c.Node, phase)
+				time.Sleep(c.PollInterval)
+				continue
+			}
+			if !statusMatchesBackup(phase, backupName, s) {
+				logInfoW(w, "[%s] phase=%s 等待本次任务开始（当前 command=%q）", c.Node, phase, s.Command)
+				time.Sleep(c.PollInterval)
+				continue
+			}
+			seenNewOperation = true
+		}
+
 		st := normalizeStatus(s.Status)
 		switch st {
 		case "success", "done", "ok":
-			logInfoW(w, "[%s] phase=%s status=success", c.Node, phase)
+			logInfoW(w, "[%s] phase=%s status=success op=%s", c.Node, phase, s.OperationID)
 			return nil
 		case "failed", "error", "fail":
 			return fmt.Errorf("phase=%s status=%s raw=%s", phase, st, s.Raw)
@@ -616,6 +656,36 @@ func (c *Client) WaitSuccess(ctx context.Context, phase string, w io.Writer) err
 			time.Sleep(c.PollInterval)
 		}
 	}
+}
+
+func isSameOperation(prev, cur statusSnapshot) bool {
+	// 如果 operation_id 可用，用它判断；否则用 command 判断。
+	if prev.OperationID != "" && cur.OperationID != "" {
+		return prev.OperationID == cur.OperationID
+	}
+	if prev.Command != "" && cur.Command != "" {
+		return prev.Command == cur.Command
+	}
+	return false
+}
+
+func statusMatchesBackup(phase, backupName string, s statusSnapshot) bool {
+	// clickhouse-backup status 返回的 command 通常包含：
+	//   create --configs <backupName>
+	//   upload <backupName>
+	cmd := strings.ToLower(s.Command)
+	if backupName != "" && (strings.Contains(s.Raw, backupName) || strings.Contains(s.Command, backupName)) {
+		// 校验一下动作关键字
+		switch phase {
+		case "create":
+			return strings.Contains(cmd, "create")
+		case "upload":
+			return strings.Contains(cmd, "upload")
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) ListBackups(ctx context.Context) ([]string, error) {
@@ -777,11 +847,15 @@ func runPhase(ctx context.Context, w io.Writer, cfg *Config, clients []*Client, 
 					logInfoW(w, "[%s] ssh create name=%s configs=%v", c.Node, backupName, cfg.Backup.Create.Configs)
 					err = sshc.Create(ctx, w, backupName, cfg.Backup.Create.Configs)
 				} else {
+					prev, _ := c.GetStatus(ctx)
 					logInfoW(w, "[%s] POST /backup/create name=%s", c.Node, backupName)
 					if len(params) > 0 {
 						logInfoW(w, "[%s] create params: %v", c.Node, params)
 					}
 					err = c.CreateBackup(ctx, backupName, params)
+					if err == nil {
+						err = c.WaitSuccess(ctx, phase, backupName, prev, w)
+					}
 				}
 			case "upload":
 				if cfg.ClickHouseBackup.Mode == "ssh" {
@@ -789,15 +863,17 @@ func runPhase(ctx context.Context, w io.Writer, cfg *Config, clients []*Client, 
 					logInfoW(w, "[%s] ssh upload name=%s", c.Node, backupName)
 					err = sshc.Upload(ctx, w, backupName)
 				} else {
+					prev, _ := c.GetStatus(ctx)
 					logInfoW(w, "[%s] POST /backup/upload name=%s", c.Node, backupName)
 					err = c.UploadBackup(ctx, backupName)
+					if err == nil {
+						err = c.WaitSuccess(ctx, phase, backupName, prev, w)
+					}
 				}
 			default:
 				err = fmt.Errorf("unknown phase: %s", phase)
 			}
-			if err == nil && cfg.ClickHouseBackup.Mode != "ssh" {
-				err = c.WaitSuccess(ctx, phase, w)
-			}
+			// API 模式的轮询已经在各分支里处理；SSH 模式依赖命令退出码。
 
 			mu.Lock()
 			defer mu.Unlock()
