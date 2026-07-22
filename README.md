@@ -18,26 +18,28 @@ dbbackup/
     mysql_backup.json
     postgresql_pgbackrest.json
     ck_cluster_backup.json
+  docs/
+    MYSQL_CONFIG.md
+    POSTGRES_CONFIG.md
+    CLICKHOUSE_CONFIG.md
   script/
     mysql_backup_cron.sh
     postgresql_backup_cron.sh
     clickhouse_backup_cron.sh
+  build/
+    mysql_backup_build.bat
+    pg_backup_build.bat
+    ck_backup_build.bat
   dist/                        # Windows 打包脚本输出目录
-  mysql_backup_build.bat
-  pg_backup_build.bat
-  ck_backup_build.bat
-  MYSQL_CONFIG.md
-  POSTGRES_CONFIG.md
-  CLICKHOUSE_CONFIG.md
   README.md
 ```
 
 ## 构建（Windows → Linux amd64）
 
 这几个 bat 会交叉编译出 Linux 可执行文件到 `dist/`：
-- MySQL：`mysql_backup_build.bat` → `dist/mysql_backup`
-- PostgreSQL：`pg_backup_build.bat` → `dist/pg_backup`
-- ClickHouse：`ck_backup_build.bat` → `dist/ck_cluster_backup`
+- MySQL：`build/mysql_backup_build.bat` → `dist/mysql_backup`
+- PostgreSQL：`build/pg_backup_build.bat` → `dist/pg_backup`
+- ClickHouse：`build/ck_backup_build.bat` → `dist/ck_cluster_backup`
 
 说明：
 - `-buildvcs=false`：禁用 VCS 信息写入，避免 “error obtaining VCS status”
@@ -46,7 +48,7 @@ dbbackup/
 ## 使用：MySQL（XtraBackup）
 
 - 配置：`config/mysql_backup.json`
-- 配置说明：`MYSQL_CONFIG.md`
+- 配置说明：`docs/MYSQL_CONFIG.md`
 
 常用命令：
 ```bash
@@ -63,7 +65,7 @@ dbbackup/
 ## 使用：PostgreSQL（pgBackRest）
 
 - 配置：`config/postgresql_pgbackrest.json`
-- 配置说明：`POSTGRES_CONFIG.md`
+- 配置说明：`docs/POSTGRES_CONFIG.md`
 
 常用命令：
 ```bash
@@ -77,15 +79,18 @@ dbbackup/
 ## 使用：ClickHouse 集群（clickhouse-backup 中控）
 
 - 配置：`config/ck_cluster_backup.json`
-- 配置说明：`CLICKHOUSE_CONFIG.md`
+- 配置说明：`docs/CLICKHOUSE_CONFIG.md`
 
 ### 备份（并发两阶段 + 轮询）
 ```bash
-# 默认 backup 子命令（可省略）
-./ck_cluster_backup -c config/ck_cluster_backup.json
+# 完整上传（默认 backup 子命令可省略）
+./ck_cluster_backup -c config/ck_cluster_backup.json -type full
+
+# 增量上传（自动选择每个节点最近一次 full 远端备份作为基线）
+./ck_cluster_backup -c config/ck_cluster_backup.json -type incr
 
 # 显式写法
-./ck_cluster_backup backup -c config/ck_cluster_backup.json
+./ck_cluster_backup backup -c config/ck_cluster_backup.json -type incr
 ```
 
 提示：如果你只想在本地生成备份、不上传 MinIO/远端仓库，可在 `config/ck_cluster_backup.json` 中设置 `backup.upload.enabled=false`。

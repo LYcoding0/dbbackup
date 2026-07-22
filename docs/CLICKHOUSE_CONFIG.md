@@ -29,9 +29,17 @@
 - `batch_mode`: 是否启用 `-o BatchMode=yes`（默认 true，避免交互式密码提示）
 
 ### backup
-- `name_prefix`: 备份名前缀，最终名称为 `<name_prefix>_<YYYYMMDD_HHMMSS>`
+- `type`: 备份类型，`full` 表示普通完整上传，`incr` 表示增量上传。`incr` 默认自动选择每个节点最新正常 full 远端备份作为 `diff_from_remote` 基线。
+- `name_prefix`: 备份名前缀，最终名称为 `<name_prefix>_<type>_<YYYYMMDD_HHMMSS>`，例如 `ck_backup_full_20260722_010000`。
 - `create.configs`: 是否携带 `configs=true` 调用 create（等价 `.../backup/create?name=xxx&configs=true`）
 - `upload.enabled`: 是否执行 Upload 阶段（是否上传到远端仓库/MinIO）。为 `false` 时只做 create，不做 upload。
+- `upload.diff_from`: 可选，基于本地已有备份做增量上传（对应 `clickhouse-backup upload --diff-from=<name>`）。
+- `upload.diff_from_remote`: 可选，基于远端已有备份做增量上传（对应 `clickhouse-backup upload --diff-from-remote=<name>`）。常用于“周一 full，周二到周日 incr”。也可设置为 `latest-full`，由每个节点自动选择同前缀的最新正常 full 远端备份；设置为 `latest` 或 `auto` 时选择最新正常远端备份，不限定 full。如果远端没有可用基线，则本次自动按普通完整上传执行。
+- `upload.resumable`: 可选，传给 upload 的 `resumable=true`/`--resumable`，用于支持可恢复上传（需当前 clickhouse-backup 版本支持）。
+- `upload.delete_source`: 可选，上传成功后删除本地备份源（需当前 clickhouse-backup 版本支持）。生产环境建议确认恢复策略后再开启。
+
+说明：`diff_from` 和 `diff_from_remote` 不能同时设置。不开这两个字段时，本工具保持普通完整上传行为。
+命令行 `-type full|incr` 会覆盖配置文件里的 `backup.type`。`-type full` 会清空增量基线；`-type incr` 如果没有显式指定 `diff_from` / `diff_from_remote`，会自动按 `diff_from_remote=latest-full` 执行。
 
 ### log
 - `dir`: 日志目录；为空则只输出到 stdout（便于 crontab）
@@ -62,6 +70,31 @@ ck-cluster-backup backup -config config/ck_cluster_backup.json -name daily_backu
 ck-cluster-backup backup -config config/ck_cluster_backup.json -nodes 10.0.0.11,10.0.0.12 -port 7171 -user api_user -pass api_password
 ```
 
+执行完整上传：
+```bash
+ck-cluster-backup backup -config config/ck_cluster_backup.json -type full
+```
+
+执行增量上传（自动选择每个节点最新 full 远端备份作为基线）：
+```bash
+ck-cluster-backup backup -config config/ck_cluster_backup.json -type incr
+```
+
+基于上一份远端备份做增量上传：
+```bash
+ck-cluster-backup backup -config config/ck_cluster_backup.json -diff-from-remote ck_backup_20260722_175304
+```
+
+自动选择每个节点最新 full 远端备份作为增量基线：
+```bash
+ck-cluster-backup backup -config config/ck_cluster_backup.json -diff-from-remote latest-full
+```
+
+自动选择每个节点最新远端备份作为增量基线（可能是上一份 incr）：
+```bash
+ck-cluster-backup backup -config config/ck_cluster_backup.json -diff-from-remote latest
+```
+
 只演练（不实际调用 API）：
 ```bash
 ck-cluster-backup backup -config config/ck_cluster_backup.json -dry-run
@@ -87,7 +120,7 @@ ck-cluster-backup list -c config/ck_cluster_backup.json
 - Query 风格：`POST /backup/upload?name=<name>`
 - Path 风格：`POST /backup/upload/<name>`
 
-你遇到的 `curl -X POST ... http://<ip>:7171/backup/upload/<备份名>` 属于第二种，本工具会自动尝试该风格作为 fallback。
+`curl -X POST ... http://<ip>:7171/backup/upload/<备份名>` 属于第二种，本工具会自动尝试该风格作为 fallback。
 
 ## go.mod 说明
 

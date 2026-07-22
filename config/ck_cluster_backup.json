@@ -19,12 +19,17 @@
     }
   },
   "backup": {
+    "type": "full",
     "name_prefix": "daily_backup",
     "create": {
       "configs": true
     },
     "upload": {
-      "enabled": true
+      "enabled": true,
+      "diff_from": "",
+      "diff_from_remote": "",
+      "resumable": false,
+      "delete_source": false
     }
   },
   "log": {

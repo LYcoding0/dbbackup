@@ -45,6 +45,7 @@ type Config struct {
 	} `json:"clickhouse_backup"`
 
 	Backup struct {
+		Type       string `json:"type"` // full / incr
 		NamePrefix string `json:"name_prefix"`
 		// Create 阶段的参数，对应 clickhouse-backup 的接口 query 参数：
 		// 例如 curl ".../backup/create?name=xxx&configs=true"
@@ -53,7 +54,11 @@ type Config struct {
 		} `json:"create"`
 
 		Upload struct {
-			Enabled *bool `json:"enabled"`
+			Enabled        *bool  `json:"enabled"`
+			DiffFrom       string `json:"diff_from"`
+			DiffFromRemote string `json:"diff_from_remote"`
+			Resumable      bool   `json:"resumable"`
+			DeleteSource   bool   `json:"delete_source"`
 		} `json:"upload"`
 	} `json:"backup"`
 
@@ -122,8 +127,8 @@ func parseCommand(args []string) (string, []string) {
 
 func usage() {
 	fmt.Println("Usage:")
-	fmt.Println("  ck-cluster-backup backup -config config/ck_cluster_backup.json [-name xxx]")
-	fmt.Println("  ck-cluster-backup backup -c      config/ck_cluster_backup.json [-name xxx]")
+	fmt.Println("  ck-cluster-backup backup -config config/ck_cluster_backup.json [-type full|incr] [-name xxx]")
+	fmt.Println("  ck-cluster-backup backup -c      config/ck_cluster_backup.json [-type full|incr] [-name xxx]")
 	fmt.Println("  ck-cluster-backup list   -config config/ck_cluster_backup.json")
 	fmt.Println("  ck-cluster-backup list   -c      config/ck_cluster_backup.json")
 	fmt.Println("")
@@ -135,23 +140,29 @@ func usage() {
 func runBackupCommand(args []string) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	var cfgPath string
+	var backupTypeOverride string
 	var nameOverride string
 	var nodesOverride string
 	var portOverride int
 	var userOverride string
 	var passOverride string
 	var schemeOverride string
+	var diffFromOverride string
+	var diffFromRemoteOverride string
 	var skipFeishu bool
 	var dryRun bool
 
 	fs.StringVar(&cfgPath, "config", "config/ck_cluster_backup.json", "配置文件路径 (JSON)")
 	fs.StringVar(&cfgPath, "c", "config/ck_cluster_backup.json", "config 简写")
+	fs.StringVar(&backupTypeOverride, "type", "", "备份类型：full 普通完整上传，incr 自动基于最近远端备份增量上传")
 	fs.StringVar(&nameOverride, "name", "", "指定备份名称（不传则自动生成）")
 	fs.StringVar(&nodesOverride, "nodes", "", "覆盖节点列表，逗号分隔，例如 10.0.0.1,10.0.0.2")
 	fs.IntVar(&portOverride, "port", 0, "覆盖 API 端口")
 	fs.StringVar(&schemeOverride, "scheme", "", "覆盖 scheme：http/https")
 	fs.StringVar(&userOverride, "user", "", "覆盖 Basic Auth 用户名")
 	fs.StringVar(&passOverride, "pass", "", "覆盖 Basic Auth 密码")
+	fs.StringVar(&diffFromOverride, "diff-from", "", "增量上传基线：本地备份名（对应 clickhouse-backup upload --diff-from）")
+	fs.StringVar(&diffFromRemoteOverride, "diff-from-remote", "", "增量上传基线：远端备份名（对应 clickhouse-backup upload --diff-from-remote）")
 	fs.BoolVar(&skipFeishu, "skip-feishu", false, "跳过飞书通知（即使配置开启）")
 	fs.BoolVar(&dryRun, "dry-run", false, "只打印计划执行内容，不实际调用 API")
 
@@ -165,6 +176,19 @@ func runBackupCommand(args []string) error {
 		return err
 	}
 	applyOverrides(cfg, nodesOverride, portOverride, schemeOverride, userOverride, passOverride)
+	if diffFromOverride != "" {
+		cfg.Backup.Upload.DiffFrom = diffFromOverride
+	}
+	if diffFromRemoteOverride != "" {
+		cfg.Backup.Upload.DiffFromRemote = diffFromRemoteOverride
+	}
+	if backupTypeOverride == "" && (diffFromOverride != "" || diffFromRemoteOverride != "") {
+		cfg.Backup.Type = "incr"
+	}
+	if err := applyBackupType(cfg, backupTypeOverride); err != nil {
+		logError("备份类型不合法: %v", err)
+		return err
+	}
 	if err := validateConfig(cfg); err != nil {
 		logError("配置不合法: %v", err)
 		return err
@@ -193,7 +217,11 @@ func runBackupCommand(args []string) error {
 	}
 
 	logInfoW(logWriter, "生成备份名: %s", backupName)
+	logInfoW(logWriter, "备份类型: %s", cfg.Backup.Type)
 	logInfoW(logWriter, "节点数: %d, port=%d, scheme=%s", len(cfg.ClickHouseBackup.Nodes), cfg.ClickHouseBackup.Port, cfg.ClickHouseBackup.Scheme)
+	if params := buildUploadParams(cfg); len(params) > 0 {
+		logInfoW(logWriter, "upload params: %v", params)
+	}
 	if dryRun {
 		logInfoW(logWriter, "dry-run: 将对所有节点执行 Phase1=create，全部成功后执行 Phase2=upload，并使用 /backup/status 轮询等待 success")
 		return nil
@@ -363,6 +391,35 @@ func applyOverrides(cfg *Config, nodesCSV string, port int, scheme, user, pass s
 	}
 }
 
+func applyBackupType(cfg *Config, backupTypeOverride string) error {
+	if backupTypeOverride != "" {
+		cfg.Backup.Type = backupTypeOverride
+	}
+
+	hasDiffConfig := strings.TrimSpace(cfg.Backup.Upload.DiffFrom) != "" || strings.TrimSpace(cfg.Backup.Upload.DiffFromRemote) != ""
+	cfg.Backup.Type = strings.ToLower(strings.TrimSpace(cfg.Backup.Type))
+	if cfg.Backup.Type == "" {
+		if hasDiffConfig {
+			cfg.Backup.Type = "incr"
+		} else {
+			cfg.Backup.Type = "full"
+		}
+	}
+
+	switch cfg.Backup.Type {
+	case "full":
+		cfg.Backup.Upload.DiffFrom = ""
+		cfg.Backup.Upload.DiffFromRemote = ""
+	case "incr":
+		if !hasDiffConfig {
+			cfg.Backup.Upload.DiffFromRemote = "latest-full"
+		}
+	default:
+		return fmt.Errorf("backup.type 只能是 full 或 incr，当前=%s", cfg.Backup.Type)
+	}
+	return nil
+}
+
 func validateConfig(cfg *Config) error {
 	if cfg.ClickHouseBackup.Mode == "" {
 		cfg.ClickHouseBackup.Mode = "api"
@@ -420,6 +477,9 @@ func validateConfig(cfg *Config) error {
 		v := true
 		cfg.Backup.Upload.Enabled = &v
 	}
+	if cfg.Backup.Upload.DiffFrom != "" && cfg.Backup.Upload.DiffFromRemote != "" {
+		return errors.New("backup.upload.diff_from 和 backup.upload.diff_from_remote 不能同时设置")
+	}
 	if cfg.Feishu.Enabled {
 		if cfg.Feishu.Webhook == "" {
 			return errors.New("feishu.webhook 不能为空")
@@ -432,6 +492,9 @@ func validateConfig(cfg *Config) error {
 }
 
 func generateBackupName(cfg *Config) string {
+	if cfg.Backup.Type != "" {
+		return fmt.Sprintf("%s_%s_%s", cfg.Backup.NamePrefix, cfg.Backup.Type, time.Now().Format("20060102_150405"))
+	}
 	return fmt.Sprintf("%s_%s", cfg.Backup.NamePrefix, time.Now().Format("20060102_150405"))
 }
 
@@ -465,8 +528,8 @@ func (c *Client) CreateBackup(ctx context.Context, name string, params map[strin
 	return c.postAction(ctx, "/backup/create", name, params)
 }
 
-func (c *Client) UploadBackup(ctx context.Context, name string) error {
-	return c.postAction(ctx, "/backup/upload", name, nil)
+func (c *Client) UploadBackup(ctx context.Context, name string, params map[string]string) error {
+	return c.postAction(ctx, "/backup/upload", name, params)
 }
 
 func (c *Client) postAction(ctx context.Context, path, name string, params map[string]string) error {
@@ -567,6 +630,12 @@ type statusSnapshot struct {
 	Progress    string
 	OperationID string
 	Raw         string
+}
+
+type backupListItem struct {
+	Name    string
+	Created time.Time
+	Broken  bool
 }
 
 func (c *Client) GetStatus(ctx context.Context) (statusSnapshot, error) {
@@ -739,6 +808,25 @@ func (c *Client) ListBackups(ctx context.Context) ([]string, error) {
 	return lines, nil
 }
 
+func (c *Client) ListRemoteBackups(ctx context.Context) ([]backupListItem, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/backup/list/remote", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw := strings.TrimSpace(string(body))
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, raw)
+	}
+	return parseBackupList(body), nil
+}
+
 type SSHClient struct {
 	Node         string
 	User         string
@@ -796,8 +884,22 @@ func (s *SSHClient) Create(ctx context.Context, w io.Writer, name string, config
 	return s.run(ctx, w, args)
 }
 
-func (s *SSHClient) Upload(ctx context.Context, w io.Writer, name string) error {
-	return s.run(ctx, w, []string{s.Bin, "upload", name})
+func (s *SSHClient) Upload(ctx context.Context, w io.Writer, name string, params map[string]string) error {
+	args := []string{s.Bin, "upload"}
+	if v := strings.TrimSpace(params["diff-from"]); v != "" {
+		args = append(args, "--diff-from="+v)
+	}
+	if v := strings.TrimSpace(params["diff-from-remote"]); v != "" {
+		args = append(args, "--diff-from-remote="+v)
+	}
+	if params["resumable"] == "true" {
+		args = append(args, "--resumable")
+	}
+	if params["delete-source"] == "true" {
+		args = append(args, "--delete-source")
+	}
+	args = append(args, name)
+	return s.run(ctx, w, args)
 }
 
 func (s *SSHClient) List(ctx context.Context, w io.Writer) ([]string, error) {
@@ -819,6 +921,15 @@ func (s *SSHClient) List(ctx context.Context, w io.Writer) ([]string, error) {
 	}
 	sort.Strings(lines)
 	return lines, nil
+}
+
+func (s *SSHClient) ListRemoteBackups(ctx context.Context, w io.Writer) ([]backupListItem, error) {
+	var buf bytes.Buffer
+	mw := io.MultiWriter(w, &buf)
+	if err := s.run(ctx, mw, []string{s.Bin, "list", "remote"}); err != nil {
+		return nil, err
+	}
+	return parseBackupList(buf.Bytes()), nil
 }
 
 func runPhase(ctx context.Context, w io.Writer, cfg *Config, clients []*Client, backupName, phase string) ClusterSummary {
@@ -858,14 +969,24 @@ func runPhase(ctx context.Context, w io.Writer, cfg *Config, clients []*Client, 
 					}
 				}
 			case "upload":
+				params, err := resolveUploadParams(ctx, w, cfg, c, backupName)
+				if err != nil {
+					break
+				}
 				if cfg.ClickHouseBackup.Mode == "ssh" {
 					sshc := NewSSHClient(cfg, c.Node)
 					logInfoW(w, "[%s] ssh upload name=%s", c.Node, backupName)
-					err = sshc.Upload(ctx, w, backupName)
+					if len(params) > 0 {
+						logInfoW(w, "[%s] upload params: %v", c.Node, params)
+					}
+					err = sshc.Upload(ctx, w, backupName, params)
 				} else {
 					prev, _ := c.GetStatus(ctx)
 					logInfoW(w, "[%s] POST /backup/upload name=%s", c.Node, backupName)
-					err = c.UploadBackup(ctx, backupName)
+					if len(params) > 0 {
+						logInfoW(w, "[%s] upload params: %v", c.Node, params)
+					}
+					err = c.UploadBackup(ctx, backupName, params)
 					if err == nil {
 						err = c.WaitSuccess(ctx, phase, backupName, prev, w)
 					}
@@ -1072,6 +1193,234 @@ func toStringSlice(v interface{}) []string {
 	default:
 		return nil
 	}
+}
+
+func buildUploadParams(cfg *Config) map[string]string {
+	params := map[string]string{}
+	if v := strings.TrimSpace(cfg.Backup.Upload.DiffFrom); v != "" {
+		params["diff-from"] = v
+	}
+	if v := strings.TrimSpace(cfg.Backup.Upload.DiffFromRemote); v != "" {
+		params["diff-from-remote"] = v
+	}
+	if cfg.Backup.Upload.Resumable {
+		params["resumable"] = "true"
+	}
+	if cfg.Backup.Upload.DeleteSource {
+		params["delete-source"] = "true"
+	}
+	return params
+}
+
+func resolveUploadParams(ctx context.Context, w io.Writer, cfg *Config, c *Client, backupName string) (map[string]string, error) {
+	params := buildUploadParams(cfg)
+	autoMode := autoDiffFromRemoteMode(cfg.Backup.Upload.DiffFromRemote)
+	if autoMode == "" {
+		return params, nil
+	}
+
+	items, err := listRemoteBackupsForNode(ctx, w, cfg, c)
+	if err != nil {
+		return nil, fmt.Errorf("自动识别远端增量基线失败: %w", err)
+	}
+	latest := selectLatestRemoteBackup(items, cfg.Backup.NamePrefix, backupName, autoMode)
+	if latest == "" {
+		delete(params, "diff-from-remote")
+		logInfoW(w, "[%s] 未找到可用远端基线，本次按普通完整上传执行", c.Node)
+		return params, nil
+	}
+	params["diff-from-remote"] = latest
+	logInfoW(w, "[%s] 自动选择远端增量基线: %s", c.Node, latest)
+	return params, nil
+}
+
+func listRemoteBackupsForNode(ctx context.Context, w io.Writer, cfg *Config, c *Client) ([]backupListItem, error) {
+	if cfg.ClickHouseBackup.Mode == "ssh" {
+		return NewSSHClient(cfg, c.Node).ListRemoteBackups(ctx, w)
+	}
+	return c.ListRemoteBackups(ctx)
+}
+
+func autoDiffFromRemoteMode(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch v {
+	case "auto", "latest":
+		return "latest"
+	case "latest-full", "latest_full", "full":
+		return "latest-full"
+	default:
+		return ""
+	}
+}
+
+func selectLatestRemoteBackup(items []backupListItem, prefix, excludeName, mode string) string {
+	if mode == "latest-full" {
+		best := selectLatestRemoteBackupWithPrefix(items, prefix+"_full", excludeName)
+		if best != "" {
+			return best
+		}
+	}
+	best := selectLatestRemoteBackupWithPrefix(items, prefix, excludeName)
+	if best != "" {
+		return best
+	}
+	return selectLatestRemoteBackupWithPrefix(items, "", excludeName)
+}
+
+func selectLatestRemoteBackupWithPrefix(items []backupListItem, prefix, excludeName string) string {
+	var best backupListItem
+	for _, it := range items {
+		if it.Name == "" || it.Name == excludeName || it.Broken {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(it.Name, prefix+"_") {
+			continue
+		}
+		if it.Created.IsZero() {
+			it.Created = parseBackupTimeFromName(it.Name)
+		}
+		if best.Name == "" || backupItemAfter(it, best) {
+			best = it
+		}
+	}
+	return best.Name
+}
+
+func backupItemAfter(a, b backupListItem) bool {
+	if !a.Created.IsZero() && !b.Created.IsZero() {
+		return a.Created.After(b.Created)
+	}
+	if !a.Created.IsZero() {
+		return true
+	}
+	if !b.Created.IsZero() {
+		return false
+	}
+	return a.Name > b.Name
+}
+
+func parseBackupList(data []byte) []backupListItem {
+	var arr []interface{}
+	if err := json.Unmarshal(data, &arr); err == nil {
+		out := make([]backupListItem, 0, len(arr))
+		for _, v := range arr {
+			switch vv := v.(type) {
+			case string:
+				out = append(out, backupListItem{Name: strings.TrimSpace(vv), Created: parseBackupTimeFromName(vv)})
+			case map[string]interface{}:
+				out = append(out, backupListItem{
+					Name:    firstString(vv, "backup_name", "backupName", "name", "Name"),
+					Created: firstTime(vv, "created", "Created", "creation_date", "creationDate", "time", "Time", "date", "Date"),
+					Broken:  backupListItemBroken(vv),
+				})
+			}
+		}
+		return out
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	out := make([]backupListItem, 0, len(lines))
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "[") || strings.HasPrefix(strings.ToLower(ln), "backups") {
+			continue
+		}
+		fields := strings.Fields(ln)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		if name == "Name" || name == "backup_name" {
+			continue
+		}
+		out = append(out, backupListItem{
+			Name:    name,
+			Created: parseBackupTimeFromLine(ln, name),
+			Broken:  strings.Contains(strings.ToLower(ln), "broken"),
+		})
+	}
+	return out
+}
+
+func backupListItemBroken(m map[string]interface{}) bool {
+	for _, key := range []string{"broken", "Broken"} {
+		if v, ok := m[key]; ok {
+			if b, ok := v.(bool); ok {
+				return b
+			}
+			if strings.EqualFold(fmt.Sprint(v), "true") {
+				return true
+			}
+		}
+	}
+	for _, key := range []string{"status", "Status", "error", "Error"} {
+		if v, ok := m[key]; ok {
+			s := strings.ToLower(fmt.Sprint(v))
+			if strings.Contains(s, "broken") || strings.Contains(s, "error") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func firstTime(m map[string]interface{}, keys ...string) time.Time {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if t := parseTimeString(fmt.Sprint(v)); !t.IsZero() {
+				return t
+			}
+		}
+	}
+	return time.Time{}
+}
+
+func parseBackupTimeFromLine(line, name string) time.Time {
+	line = strings.TrimSpace(strings.TrimPrefix(line, name))
+	fields := strings.Fields(line)
+	for i := 0; i < len(fields); i++ {
+		if t := parseTimeString(fields[i]); !t.IsZero() {
+			return t
+		}
+		if i+1 < len(fields) {
+			if t := parseTimeString(fields[i] + " " + fields[i+1]); !t.IsZero() {
+				return t
+			}
+		}
+	}
+	return parseBackupTimeFromName(name)
+}
+
+func parseBackupTimeFromName(name string) time.Time {
+	for i := len(name) - len("20060102_150405"); i >= 0; i-- {
+		if i+len("20060102_150405") > len(name) {
+			continue
+		}
+		part := name[i : i+len("20060102_150405")]
+		if part[8] != '_' {
+			continue
+		}
+		if t, err := time.ParseInLocation("20060102_150405", part, time.Local); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func parseTimeString(s string) time.Time {
+	s = strings.Trim(strings.TrimSpace(s), `"`)
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"20060102_150405",
+	} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 func normalizeStatus(s string) string {
