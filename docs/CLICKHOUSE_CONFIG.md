@@ -31,6 +31,7 @@
 ### backup
 - `type`: 备份类型，`full` 表示普通完整上传，`incr` 表示增量上传。`incr` 默认自动选择每个节点最新正常 full 远端备份作为 `diff_from_remote` 基线。
 - `name_prefix`: 备份名前缀，最终名称为 `<name_prefix>_<type>_<YYYYMMDD_HHMMSS>`，例如 `ck_backup_full_20260722_010000`。
+- `disk_path`: 可选，飞书通知中展示该路径所在文件系统的总量、已用、可用、使用率和挂载点。建议填 ClickHouse 备份所在分区，例如 `/data/clickhouse/data`。
 - `create.configs`: 是否携带 `configs=true` 调用 create（等价 `.../backup/create?name=xxx&configs=true`）
 - `upload.enabled`: 是否执行 Upload 阶段（是否上传到远端仓库/MinIO）。为 `false` 时只做 create，不做 upload。
 - `upload.diff_from`: 可选，基于本地已有备份做增量上传（对应 `clickhouse-backup upload --diff-from=<name>`）。

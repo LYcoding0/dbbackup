@@ -21,6 +21,7 @@
   "backup": {
     "type": "full",
     "name_prefix": "daily_backup",
+    "disk_path": "/data/clickhouse/data",
     "create": {
       "configs": true
     },

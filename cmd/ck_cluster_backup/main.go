@@ -47,6 +47,7 @@ type Config struct {
 	Backup struct {
 		Type       string `json:"type"` // full / incr
 		NamePrefix string `json:"name_prefix"`
+		DiskPath   string `json:"disk_path"`
 		// Create 阶段的参数，对应 clickhouse-backup 的接口 query 参数：
 		// 例如 curl ".../backup/create?name=xxx&configs=true"
 		Create struct {
@@ -1057,6 +1058,7 @@ func sendFeishu(cfg *Config, s ClusterSummary, status string, msg string) {
 		fmt.Sprintf("**主机**：%s", host),
 		fmt.Sprintf("**IP**：%s", ip),
 		fmt.Sprintf("**备份名**：%s", s.BackupName),
+		fmt.Sprintf("**备份分区**：%s", backupDiskUsage(cfg)),
 		fmt.Sprintf("**阶段**：%s", s.Phase),
 		fmt.Sprintf("**成功节点**：%d", len(s.Successes)),
 		fmt.Sprintf("**失败节点**：%d", len(s.Failures)),
@@ -1112,6 +1114,41 @@ func sendFeishu(cfg *Config, s ClusterSummary, status string, msg string) {
 	if err := postFeishuWebhook(cfg.Feishu.Webhook, textPayload); err != nil {
 		logError("send feishu failed: %v", err)
 	}
+}
+
+func backupDiskUsage(cfg *Config) string {
+	path := strings.TrimSpace(cfg.Backup.DiskPath)
+	if path == "" {
+		path = strings.TrimSpace(cfg.Log.Dir)
+	}
+	if path == "" {
+		path = "."
+	}
+
+	out, err := exec.Command("df", "-hP", path).Output()
+	if err != nil {
+		return fmt.Sprintf("%s 获取失败: %v", path, err)
+	}
+	return parseDiskUsage(path, out)
+}
+
+func parseDiskUsage(path string, data []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 2 {
+		return strings.TrimSpace(string(data))
+	}
+
+	fields := strings.Fields(lines[len(lines)-1])
+	if len(fields) < 6 {
+		return strings.TrimSpace(lines[len(lines)-1])
+	}
+
+	size := fields[1]
+	used := fields[2]
+	avail := fields[3]
+	usePercent := fields[4]
+	mount := strings.Join(fields[5:], " ")
+	return fmt.Sprintf("%s 总量=%s 已用=%s 可用=%s 使用率=%s 挂载点=%s", path, size, used, avail, usePercent, mount)
 }
 
 func postFeishuWebhook(webhook string, payload map[string]interface{}) error {
@@ -1300,19 +1337,26 @@ func backupItemAfter(a, b backupListItem) bool {
 }
 
 func parseBackupList(data []byte) []backupListItem {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(data, &obj); err == nil {
+		if it := parseBackupListMap(obj); it.Name != "" {
+			return []backupListItem{it}
+		}
+	}
+
 	var arr []interface{}
 	if err := json.Unmarshal(data, &arr); err == nil {
 		out := make([]backupListItem, 0, len(arr))
 		for _, v := range arr {
 			switch vv := v.(type) {
 			case string:
-				out = append(out, backupListItem{Name: strings.TrimSpace(vv), Created: parseBackupTimeFromName(vv)})
+				if it := parseBackupListString(vv); it.Name != "" {
+					out = append(out, it)
+				}
 			case map[string]interface{}:
-				out = append(out, backupListItem{
-					Name:    firstString(vv, "backup_name", "backupName", "name", "Name"),
-					Created: firstTime(vv, "created", "Created", "creation_date", "creationDate", "time", "Time", "date", "Date"),
-					Broken:  backupListItemBroken(vv),
-				})
+				if it := parseBackupListMap(vv); it.Name != "" {
+					out = append(out, it)
+				}
 			}
 		}
 		return out
@@ -1324,6 +1368,12 @@ func parseBackupList(data []byte) []backupListItem {
 		ln = strings.TrimSpace(ln)
 		if ln == "" || strings.HasPrefix(ln, "[") || strings.HasPrefix(strings.ToLower(ln), "backups") {
 			continue
+		}
+		if strings.HasPrefix(ln, "{") {
+			if it := parseBackupListString(ln); it.Name != "" {
+				out = append(out, it)
+				continue
+			}
 		}
 		fields := strings.Fields(ln)
 		if len(fields) == 0 {
@@ -1340,6 +1390,28 @@ func parseBackupList(data []byte) []backupListItem {
 		})
 	}
 	return out
+}
+
+func parseBackupListMap(m map[string]interface{}) backupListItem {
+	return backupListItem{
+		Name:    firstString(m, "backup_name", "backupName", "name", "Name"),
+		Created: firstTime(m, "created", "Created", "creation_date", "creationDate", "time", "Time", "date", "Date"),
+		Broken:  backupListItemBroken(m),
+	}
+}
+
+func parseBackupListString(s string) backupListItem {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return backupListItem{}
+	}
+
+	var obj map[string]interface{}
+	if strings.HasPrefix(s, "{") && json.Unmarshal([]byte(s), &obj) == nil {
+		return parseBackupListMap(obj)
+	}
+
+	return backupListItem{Name: s, Created: parseBackupTimeFromName(s)}
 }
 
 func backupListItemBroken(m map[string]interface{}) bool {
